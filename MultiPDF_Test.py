@@ -1,17 +1,23 @@
 import chromadb
 from langchain_community.vectorstores import Chroma
-from langchain_community.embeddings import OllamaEmbeddings
-from langchain_ollama.llms import OllamaLLM
+# from langchain_community.embeddings import OllamaEmbeddings
+# from langchain_ollama.llms import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
 from collections import defaultdict
 import json
+import os
+from langchain_openai import OpenAIEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+load_dotenv()
 
 # Initialize embedder and persistent ChromaDB client
 query = "give me separately the Female CI medical conditions for both CS_TALR7983-0923-accelerated-protection-pds-8-sep-2023 and CS_TAL_AcceleratedProtection_2022-08-05"
-embedder = OllamaEmbeddings(model="mxbai-embed-large")
-client = chromadb.PersistentClient(path="chroma_multiple_2")
+# embedder = OllamaEmbeddings(model="mxbai-embed-large")
+embedder = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
+client = chromadb.PersistentClient(path="chromadb")
 namespaces = [col.name for col in client.list_collections()]
-llm = OllamaLLM(model="llama3.2", temperature=0)
+llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0, google_api_key=os.getenv("GOOGLE_API_KEY"))
 
 # === Custom Prompt ===
 custom_prompt_str = """
@@ -49,7 +55,15 @@ print(result)
 
 # === Retrieve and Format Contexts ===
 def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=5):
-    sub_questions = json.loads(llm_output)
+    # Extract content from AIMessage and remove markdown formatting
+    content = llm_output.content if hasattr(llm_output, 'content') else str(llm_output)
+    # Remove markdown code block formatting if present
+    if content.startswith('```json'):
+        content = content.replace('```json\n', '').replace('\n```', '')
+    elif content.startswith('```'):
+        content = content.replace('```\n', '').replace('\n```', '')
+    
+    sub_questions = json.loads(content)
     all_docs = []
 
     for item in sub_questions:

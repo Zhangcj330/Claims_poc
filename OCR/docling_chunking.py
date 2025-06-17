@@ -37,7 +37,7 @@ def process_document_with_chunking(source_path, chunk_size=512, chunk_overlap=10
     )
     
     # Step 4: Chunk the document
-    chunks = chunker.chunk(doc)
+    chunks = list(chunker.chunk(doc))
     
     print(f"Chunking completed, generated {len(chunks)} chunks")
     
@@ -49,32 +49,43 @@ def process_document_with_chunking(source_path, chunk_size=512, chunk_overlap=10
             'id': i,
             'text': chunk_text,
             'length': len(chunk_text),
-            'page': getattr(chunk, 'page', None),
-            'section': getattr(chunk, 'section', None),
-            'metadata': {
-                'char_count': len(chunk_text),
-                'word_count': len(chunk_text.split()),
-                'has_tables': '|' in chunk_text or 'Table' in chunk_text,
-                'has_lists': any(line.strip().startswith(('-', '*', '•')) for line in chunk_text.split('\n'))
-            }
+            'page_no': getattr(chunk.meta.doc_items[0].prov[0], 'page_no', None) if chunk.meta.doc_items and chunk.meta.doc_items[0].prov else None,
+            'char_count': len(chunk_text),
+            'word_count': len(chunk_text.split()),
+            # change to has_tables and has_lists
+            'has_tables': any(str(getattr(item, 'label', '')).lower() in ['table', 'table_cell'] for item in chunk.meta.doc_items) if chunk.meta.doc_items else False,
+            'has_lists': any(str(getattr(item, 'label', '')).lower() in ['list_item', 'list'] for item in chunk.meta.doc_items) if chunk.meta.doc_items else False,
+            'headings': ', '.join(getattr(chunk.meta, 'headings', [])) if getattr(chunk.meta, 'headings', []) else '',
+            'captions': str(getattr(chunk.meta, 'captions', '')) if getattr(chunk.meta, 'captions', None) is not None else '',
+            'content_layer': str(getattr(chunk.meta.doc_items[0], 'content_layer', None)) if chunk.meta.doc_items else None,
+            'content_label': str(getattr(chunk.meta.doc_items[0], 'label', None)) if chunk.meta.doc_items else None,
+            'bbox_left': min(getattr(item.prov[0].bbox, 'l', float('inf')) for item in chunk.meta.doc_items if item.prov and hasattr(item.prov[0], 'bbox')) if chunk.meta.doc_items and any(item.prov and hasattr(item.prov[0], 'bbox') for item in chunk.meta.doc_items) else None,
+            'bbox_top': max(getattr(item.prov[0].bbox, 't', float('-inf')) for item in chunk.meta.doc_items if item.prov and hasattr(item.prov[0], 'bbox')) if chunk.meta.doc_items and any(item.prov and hasattr(item.prov[0], 'bbox') for item in chunk.meta.doc_items) else None,
+            'bbox_right': max(getattr(item.prov[0].bbox, 'r', float('-inf')) for item in chunk.meta.doc_items if item.prov and hasattr(item.prov[0], 'bbox')) if chunk.meta.doc_items and any(item.prov and hasattr(item.prov[0], 'bbox') for item in chunk.meta.doc_items) else None,
+            'bbox_bottom': min(getattr(item.prov[0].bbox, 'b', float('inf')) for item in chunk.meta.doc_items if item.prov and hasattr(item.prov[0], 'bbox')) if chunk.meta.doc_items and any(item.prov and hasattr(item.prov[0], 'bbox') for item in chunk.meta.doc_items) else None,
+            'doc_filename': getattr(chunk.meta.origin, 'filename', None) if hasattr(chunk.meta, 'origin') else None
         }
         chunk_info.append(chunk_data)
     
     # Step 6: Generate output filenames
-    base_name = os.path.splitext(source_path)[0]
+    base_name = os.path.splitext(os.path.basename(source_path))[0]
+    
+    # Create Data_Json directory if it doesn't exist
+    output_dir = os.path.join(os.path.dirname(os.path.dirname(source_path)), "Data_Json")
+    os.makedirs(output_dir, exist_ok=True)
     
     # Save original markdown
-    markdown_file = f"{base_name}_converted.md"
+    markdown_file = os.path.join(output_dir, f"{base_name}_converted.md")
     with open(markdown_file, 'w', encoding='utf-8') as f:
         f.write(markdown_content)
     
     # Save chunking results as JSON
-    chunks_file = f"{base_name}_chunks.json"
+    chunks_file = os.path.join(output_dir, f"{base_name}_chunks.json")
     with open(chunks_file, 'w', encoding='utf-8') as f:
         json.dump(chunk_info, f, ensure_ascii=False, indent=2)
     
     # Save readable chunks file
-    readable_chunks_file = f"{base_name}_chunks_readable.txt"
+    readable_chunks_file = os.path.join(output_dir, f"{base_name}_chunks_readable.txt")
     with open(readable_chunks_file, 'w', encoding='utf-8') as f:
         f.write(f"Document Chunking Results\n{'='*50}\n\n")
         f.write(f"Original document: {source_path}\n")
@@ -83,12 +94,13 @@ def process_document_with_chunking(source_path, chunk_size=512, chunk_overlap=10
         
         for chunk_data in chunk_info:
             f.write(f"--- Chunk {chunk_data['id'] + 1} ---\n")
-            f.write(f"Length: {chunk_data['length']} characters, {chunk_data['metadata']['word_count']} words\n")
-            if chunk_data['page']:
-                f.write(f"Page: {chunk_data['page']}\n")
+            f.write(f"Length: {chunk_data['length']} characters, {chunk_data['word_count']} words\n")
+            if chunk_data['page_no']:
+                f.write(f"Page: {chunk_data['page_no']}\n")
             f.write(f"Content:\n{chunk_data['text']}\n\n")
     
     # Step 7: Print statistics
+    
     print(f"\nDocument processing completed!")
     print(f"├── Original document: {markdown_file}")
     print(f"├── Chunks JSON: {chunks_file}")
@@ -99,8 +111,8 @@ def process_document_with_chunking(source_path, chunk_size=512, chunk_overlap=10
     print(f"├── Average chunk size: {sum(c['length'] for c in chunk_info) / len(chunk_info):.0f} characters")
     print(f"├── Largest chunk: {max(c['length'] for c in chunk_info)} characters")
     print(f"├── Smallest chunk: {min(c['length'] for c in chunk_info)} characters")
-    print(f"├── Chunks with tables: {sum(1 for c in chunk_info if c['metadata']['has_tables'])}")
-    print(f"└── Chunks with lists: {sum(1 for c in chunk_info if c['metadata']['has_lists'])}")
+    print(f"├── Chunks with tables: {sum(1 for c in chunk_info if c['has_tables'])}")
+    print(f"└── Chunks with lists: {sum(1 for c in chunk_info if c['has_lists'])}")
     
     return {
         'document': doc,
@@ -135,8 +147,8 @@ def analyze_chunks_quality(chunk_info):
         print(f"├── Too large chunks ({len(too_large)}): may need to adjust splitting strategy")
     
     # Content type analysis
-    table_chunks = sum(1 for c in chunk_info if c['metadata']['has_tables'])
-    list_chunks = sum(1 for c in chunk_info if c['metadata']['has_lists'])
+    table_chunks = sum(1 for c in chunk_info if c['has_tables'])
+    list_chunks = sum(1 for c in chunk_info if c['has_lists'])
     
     print(f"├── Table chunks: {table_chunks} ({table_chunks/len(chunk_info)*100:.1f}%)")
     print(f"└── List chunks: {list_chunks} ({list_chunks/len(chunk_info)*100:.1f}%)")
@@ -148,7 +160,7 @@ if __name__ == "__main__":
     if os.path.exists(source_file):
         result = process_document_with_chunking(
             source_file, 
-            chunk_size=512,  # Can be adjusted as needed
+            chunk_size=768,  # Can be adjusted as needed
             chunk_overlap=50
         )
         

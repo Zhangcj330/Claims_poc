@@ -1,2 +1,6 @@
 docling
-docling[chunking]
+docling-core[chunking]
+chromadb
+langchain_community
+tqdm
+langchain-google-genai
