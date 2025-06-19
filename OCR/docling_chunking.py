@@ -100,7 +100,7 @@ def process_document_with_chunking(source_path, chunk_size=512, chunk_overlap=10
             f.write(f"Content:\n{chunk_data['text']}\n\n")
     
     # Step 7: Print statistics
-    
+
     print(f"\nDocument processing completed!")
     print(f"├── Original document: {markdown_file}")
     print(f"├── Chunks JSON: {chunks_file}")
@@ -155,7 +155,7 @@ def analyze_chunks_quality(chunk_info):
 
 if __name__ == "__main__":
     # Example usage
-    source_file = "TALR7983-0923-accelerated-protection-pds-8-sep-2023.pdf"
+    source_file = "TAL_AcceleratedProtection_2022-08-05.pdf"
     
     if os.path.exists(source_file):
         result = process_document_with_chunking(

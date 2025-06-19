@@ -1,6 +1,11 @@
-docling
-docling-core[chunking]
 chromadb
 langchain_community
 tqdm
 langchain-google-genai
+langchain-core
+langchain_chroma
+python-dotenv
+PyMuPDF
+Pillow
+
+docling

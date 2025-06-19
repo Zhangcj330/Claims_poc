@@ -1,5 +1,5 @@
 import chromadb
-from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 # from langchain_community.embeddings import OllamaEmbeddings
 # from langchain_ollama.llms import OllamaLLM
 from langchain_core.prompts import ChatPromptTemplate
@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize embedder and persistent ChromaDB client
-query = "give me separately the Female CI medical conditions for both CS_TALR7983-0923-accelerated-protection-pds-8-sep-2023 and CS_TAL_AcceleratedProtection_2022-08-05"
+query = "give me separately the Critical Illness conditions for both TAL 2022 and TAL 2023"
 # embedder = OllamaEmbeddings(model="mxbai-embed-large")
 embedder = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
 client = chromadb.PersistentClient(path="chromadb")
@@ -54,7 +54,7 @@ result = chain.invoke({"query": query, "tools": namespaces})
 print(result)
 
 # === Retrieve and Format Contexts ===
-def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=5):
+def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=15):
     # Extract content from AIMessage and remove markdown formatting
     content = llm_output.content if hasattr(llm_output, 'content') else str(llm_output)
     # Remove markdown code block formatting if present
@@ -81,7 +81,7 @@ def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=5):
             search_kwargs={"k": k, "lambda_mult": 0.8}
         )
 
-        results = retriever.get_relevant_documents(question)
+        results = retriever.invoke(question)
 
         for doc in results:
             metadata = doc.metadata
@@ -89,9 +89,13 @@ def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=5):
                 "namespace": namespace,
                 "sub_question": question,
                 "source_file": metadata.get("source_file", "N/A"),
-                "title": metadata.get("title", "N/A"),
-                "subheader": metadata.get("subheader", "N/A"),
-                "content": metadata.get("raw_content", "")
+                "document_name": metadata.get("document_name", metadata.get("title", "N/A")),
+                "section_title": metadata.get("section_title", "N/A"),  
+                "subheading": metadata.get("subheading", "N/A"),
+                "content": doc.page_content,
+                "insurer": metadata.get("insurer", "N/A"),
+                "product_type": metadata.get("product_type", "N/A"),
+                "page_no": metadata.get("page_no", "N/A")
             })
         
 
@@ -111,8 +115,11 @@ def group_and_format_docs(docs):
                 f"--- START OF DOCUMENT ---\n"
                 f"Sub-question: {doc['sub_question']}\n"
                 f"Source File: {doc['source_file']}\n"
-                f"Title: {doc['title']}\n"
-                f"Subheader: {doc['subheader']}\n"
+                f"Insurer: {doc.get('insurer', 'N/A')}\n"
+                f"Product Type: {doc.get('product_type', 'N/A')}\n"
+                f"Page No: {doc.get('page_no', 'N/A')}\n"
+                f"Section Title: {doc.get('section_title', 'N/A')}\n"
+                f"Subheading: {doc.get('subheading', 'N/A')}\n"
                 f"Content:\n{doc['content']}\n"
                 f"--- END OF DOCUMENT ---"
               
@@ -129,8 +136,9 @@ You are provided with multiple document excerpts. Each excerpt is clearly marked
 - Namespace
 - Sub-question
 - Source File
-- Title
-- Subheader
+- Document Name
+- Section Title
+- Subheading
 - Content
 - '--- END OF DOCUMENT ---'
 
@@ -141,8 +149,9 @@ Your task is to:
 4. When referencing information, always include the [source_file, subheader] in brackets.
 5. Ensure your answer is structured, accurate, and easy to follow.
 6. At the end, include a "Sources" section in bullet format, listing:
-   - Subheader
-   - Title
+   - Subheading 
+   - Section Title
+   - Document Name
    - Source File
 
 You are not limited to any specific topic — the question may relate to definitions, exclusions, benefits, waiting periods, claim processes, or any other aspect of the PDS.
@@ -154,7 +163,7 @@ Context:
 Question:
 {question}
 
-Do not forget to include a "Sources" section in bullet format (task 6) which includes the Subheader, Title, and Source File for all the documnets used
+Do not forget to include a "Sources" section in bullet format (task 6) which includes the Subheader, Title, and Source File for all the documents used
 """)
 
     chain = prompt | llm
@@ -168,4 +177,4 @@ print(context_str)
 
 print("==========================================================")
 final_answer = generate_final_answer(query, context_str, llm)
-print("\nFinal Answer:\n", final_answer)
+print("\nFinal Answer:\n", final_answer.content)

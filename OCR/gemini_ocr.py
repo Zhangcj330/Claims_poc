@@ -8,7 +8,8 @@ import fitz  # PyMuPDF
 from PIL import Image
 import io
 import base64
-import google.generativeai as genai
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import HumanMessage, SystemMessage
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -25,8 +26,11 @@ class GeminiPDSProcessor:
         if not self.api_key:
             raise ValueError("Google API key is required. Set GOOGLE_API_KEY environment variable or pass api_key parameter.")
         
-        genai.configure(api_key=self.api_key)
-        self.model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        self.model = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash", 
+            api_key=self.api_key,
+            temperature=0.1,
+        )
         
         # System prompt for document understanding and chunking
         self.system_prompt = """
@@ -37,36 +41,43 @@ CRITICAL REQUIREMENTS:
 1. Extract coherent chunks based on document structure (headings, sections, paragraphs)
 2. Each chunk should be 50-1000 words and represent a logical unit of content
 3. Preserve hierarchical relationships (sections, subsections)
-4. Extract ALL required metadata fields for each chunk
+4. Focus on PAGE-LEVEL metadata extraction only
 5. Use heading detection to determine section structure
 6. Handle tables, lists, and complex layouts intelligently
+7. **CONTEXT AWARENESS**: Consider previous page context for section continuity
 
 For each page, return a JSON array of chunks following this EXACT schema:
 {
-  "Insurer": "string",
-  "Document_Name": "string", 
-  "Document_Date": "YYYY-MM-DD",
   "Section_Title": "string",
-  "Subheading": "string",
-  "Captions": "string",
-  "Product_type": "string",
-  "Page_no": number,
-  "content": "string"
+  "Subheading": "string", 
+  "content": "string",
+  "content_label": "string"
 }
 
-METADATA EXTRACTION RULES:
-- Insurer: Extract from header, footer, or document title
-- Document_Name: Use document title or filename
-- Document_Date: Find publication/effective date in ISO format
-- Section_Title: Top-level section (e.g., "Section 2: Benefits")
-- Subheading: Immediate subsection heading
-- Captions: Any table/figure captions associated with the chunk
-- Product_type: Infer from content (Life, TPD, Income Protection, etc.)
-- Page_no: Current page number
-- content: Main body text of the chunk
+PAGE-LEVEL METADATA EXTRACTION RULES:
+- Section_Title: Top-level section heading on this page (e.g., "Section 2: Benefits", "Claims", "Definitions")
+  * If NO new section heading is visible on this page, use "N/A" - the system will inherit from previous page
+  * Only specify a Section_Title if you see a clear, new section heading on this page
+- Subheading: Immediate subsection heading for this chunk (e.g., "Life Insurance Benefits", "Exclusions")
+  * Same inheritance logic applies - use "N/A" if no new subheading is found
+- content: Main body text of the chunk (50-1000 words, coherent semantic unit)
+- content_label: Label for the content type (e.g., "text", "image", "table", "list", "equation", "figure")
 
-If any field cannot be determined, use "N/A" or "Unknown".
-Ensure each chunk is meaningful and self-contained while respecting document structure.
+SECTION CONTINUITY RULES:
+- Many sections span multiple pages in insurance documents
+- Only change Section_Title when you see a NEW section heading (e.g., "Section 3:", "Claims Process", "Definitions")
+- If the page is continuing content from a previous section without a new heading, use "N/A" for Section_Title
+- The system will automatically inherit the correct Section_Title from the previous page
+- This ensures consistent metadata across pages within the same logical section
+
+IMPORTANT NOTES:
+- DO NOT extract global document metadata (Insurer, Document_Name, Document_Date, Product_type, Page_no)
+- Focus ONLY on page-specific content structure and semantic chunking
+- Ensure each chunk represents a logical, self-contained unit of information
+- Respect document hierarchy: group content under appropriate section/subsection headings
+- Pay attention to visual cues like checkmarks, bullet points, and formatting
+
+CRITICAL: If the page contains NO substantial text content (e.g., cover pages, pure image pages, blank pages), return a single chunk with content_label: "image" and content describing what is visible on the page (e.g., "Cover page with company logo", "Blank page", "Page contains only images/diagrams"). This ensures every page generates a chunk for tracking purposes.
 """
 
     def pdf_to_images(self, pdf_path: str, dpi: int = 200) -> List[tuple]:
@@ -112,7 +123,7 @@ Ensure each chunk is meaningful and self-contained while respecting document str
         # Extract from first few pages using OCR
         try:
             first_pages = []
-            for page_num in range(min(3, len(doc))):  # First 3 pages
+            for page_num in range(min(5, len(doc))):  # First 3 pages
                 page = doc.load_page(page_num)
                 mat = fitz.Matrix(2, 2)  # Higher resolution for better OCR
                 pix = page.get_pixmap(matrix=mat)
@@ -122,7 +133,7 @@ Ensure each chunk is meaningful and self-contained while respecting document str
             
             # Use Gemini to extract metadata from first pages
             if first_pages:
-                global_metadata = self._extract_document_metadata(first_pages)
+                global_metadata = self._extract_document_metadata(first_pages, pdf_path)
                 metadata.update(global_metadata)
                 
         except Exception as e:
@@ -131,10 +142,10 @@ Ensure each chunk is meaningful and self-contained while respecting document str
         doc.close()
         return metadata
 
-    def _extract_document_metadata(self, images: List[Image.Image]) -> Dict[str, str]:
+    def _extract_document_metadata(self, images: List[Image.Image], file_name: str) -> Dict[str, str]:
         """Use Gemini to extract document-level metadata from first few pages"""
-        prompt = """
-Analyze these first few pages of an insurance document and extract:
+        prompt = f"""
+Analyze the first few pages of an insurance document, along with the file name {file_name}, to extract the following information:
 1. Insurer name (company providing the insurance)
 2. Document name/title
 3. Document date (publication or effective date in YYYY-MM-DD format)
@@ -145,15 +156,27 @@ If any information is not found, use "Unknown".
 """
         
         try:
-            # Prepare content for Gemini
-            content = [prompt]
-            for img in images[:2]:  # Limit to first 2 pages for metadata
-                content.append(img)
+            # Convert PIL images to base64 for LangChain
+            content_parts = [{"type": "text", "text": prompt}]
             
-            response = self.model.generate_content(content)
+            for img in images[:2]:  # Limit to first 2 pages for metadata
+                # Convert PIL Image to base64
+                buffer = io.BytesIO()
+                img.save(buffer, format="PNG")
+                image_base64 = base64.b64encode(buffer.getvalue()).decode()
+                
+                content_parts.append({
+                    "type": "image_url",
+                    "image_url": f"data:image/png;base64,{image_base64}"
+                })
+            
+            # Create HumanMessage with multimodal content
+            message = HumanMessage(content=content_parts)
+            
+            response = self.model.invoke([message])
             
             # Parse JSON response
-            json_match = re.search(r'\{[^}]+\}', response.text)
+            json_match = re.search(r'\{[^}]+\}', response.content)
             if json_match:
                 return json.loads(json_match.group())
         except Exception as e:
@@ -161,43 +184,122 @@ If any information is not found, use "Unknown".
         
         return {}
 
-    def process_page(self, image: Image.Image, page_num: int, global_metadata: Dict[str, str]) -> List[Dict[str, Any]]:
-        """Process a single page and extract chunks"""
-        try:
-            content = [
-                self.system_prompt,
-                f"\nProcess this page {page_num} of an insurance PDS document.",
-                f"Global document metadata: {json.dumps(global_metadata)}",
-                "\nExtract chunks following the specified JSON schema:",
-                image
-            ]
-            
-            response = self.model.generate_content(
-                content,
-                generation_config=genai.types.GenerationConfig(
-                    temperature=0.1,  # Low temperature for consistency
-                    max_output_tokens=8192
-                )
-            )
-            
-            # Extract JSON from response
-            chunks = self._parse_chunks_response(response.text, page_num, global_metadata)
-            return chunks
-            
-        except Exception as e:
-            print(f"Error processing page {page_num}: {e}")
-            return self._create_error_chunk(page_num, global_metadata, str(e))
+    def process_page(self, image: Image.Image, page_num: int, global_metadata: Dict[str, str], previous_context: Optional[Dict[str, str]] = None, max_retries: int = 3) -> tuple[List[Dict[str, Any]], Dict[str, str]]:
+        """Process a single page and extract chunks with retry mechanism, returning chunks and current context"""
+        
+        last_error = None
+        
+        for attempt in range(max_retries):
+            try:
+                # Prepare context information for the prompt
+                context_info = ""
+                if previous_context:
+                    context_info = f"""
+CONTEXT FROM PREVIOUS PAGE:
+- Previous Section_Title: "{previous_context.get('Section_Title', 'N/A')}"
+- Previous Subheading: "{previous_context.get('Subheading', 'N/A')}"    
 
-    def _parse_chunks_response(self, response_text: str, page_num: int, global_metadata: Dict[str, str]) -> List[Dict[str, Any]]:
-        """Parse Gemini response and extract chunks"""
+CONTEXT RULES:
+- If this page does not contain a new Section_Title heading, inherit the previous Section_Title
+- Only change Section_Title if you see a clear new section heading on this page
+- This ensures consistency across pages within the same section
+"""
+                
+                # Convert PIL Image to base64 for LangChain
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+                image_base64 = base64.b64encode(buffer.getvalue()).decode()
+                
+                # Create human message content with text and image
+                human_content = [
+                    {
+                        "type": "text", 
+                        "text": f"""{context_info}
+
+Process this page {page_num} of an insurance PDS document.
+Global document metadata: {json.dumps(global_metadata)}
+
+Extract chunks following the specified JSON schema."""
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": f"data:image/png;base64,{image_base64}"
+                    }
+                ]
+                
+                # Create messages with proper separation
+                messages = [
+                    SystemMessage(content=self.system_prompt),
+                    HumanMessage(content=human_content)
+                ]
+                
+                response = self.model.invoke(messages)
+                
+                # Extract JSON from response
+                chunks = self._parse_chunks_response(response.content, page_num, global_metadata, previous_context)
+                
+                # Check if chunks are valid (not error or fallback chunks that indicate failure)
+                has_error_chunks = any(chunk.get('content_label') in ['error', 'fallback'] for chunk in chunks)
+                
+                if has_error_chunks and attempt < max_retries - 1:
+                    print(f"    🔄 Attempt {attempt + 1} failed for page {page_num} (got error/fallback chunks), retrying...")
+                    continue
+                
+                # Success or final attempt - extract current page context for next page
+                current_context = self._extract_current_context(chunks, previous_context)
+                
+                if attempt > 0:
+                    print(f"    ✅ Page {page_num} succeeded on attempt {attempt + 1}")
+                
+                return chunks, current_context
+                
+            except Exception as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    print(f"    🔄 Attempt {attempt + 1} failed for page {page_num}: {e}, retrying...")
+                    continue
+                else:
+                    print(f"    ❌ All {max_retries} attempts failed for page {page_num}: {e}")
+                    break
+        
+        # All retries failed, create error chunk
+        error_msg = str(last_error) if last_error else "Unknown error after retries"
+        error_chunks = self._create_failure_chunk(
+            page_num, 
+            global_metadata, 
+            f"Error processing page {page_num}: Failed after {max_retries} attempts: {error_msg}",
+            failure_type="error"
+        )
+        return error_chunks, previous_context or {}
+
+    def _extract_current_context(self, chunks: List[Dict[str, Any]], previous_context: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+        """Extract context information from current page chunks for next page"""
+        if not chunks:
+            return previous_context or {}
+        
+        # Find the most recent non-N/A Section_Title and Subheading
+        current_context = previous_context.copy() if previous_context else {}
+        
+        for chunk in chunks:
+            if chunk.get('Section_Title') and chunk['Section_Title'] != 'N/A':
+                current_context['Section_Title'] = chunk['Section_Title']
+            if chunk.get('Subheading') and chunk['Subheading'] != 'N/A':
+                current_context['Subheading'] = chunk['Subheading']
+        
+        return current_context
+
+    def _parse_chunks_response(self, response_text: str, page_num: int, global_metadata: Dict[str, str], previous_context: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+        """Parse Gemini response and extract chunks with page-level metadata only"""
         chunks = []
+        
+        print(f"    📝 Parsing response for page {page_num}...")
         
         # Try to find JSON arrays in the response
         json_pattern = r'\[.*?\]'
         json_matches = re.findall(json_pattern, response_text, re.DOTALL)
         
         if not json_matches:
-            # Try to find individual JSON objects
+            # Try to find individual JSON objects with content field
             json_pattern = r'\{[^}]*"content"[^}]*\}'
             json_matches = re.findall(json_pattern, response_text, re.DOTALL)
             if json_matches:
@@ -209,89 +311,121 @@ If any information is not found, use "Unknown".
                 if isinstance(parsed_chunks, list):
                     for chunk in parsed_chunks:
                         if isinstance(chunk, dict) and 'content' in chunk:
-                            # Validate and clean chunk
-                            cleaned_chunk = self._validate_chunk(chunk, page_num, global_metadata)
+                            # Validate and clean chunk (adds global metadata consistently)
+                            cleaned_chunk = self._validate_chunk(chunk, page_num, global_metadata, previous_context)
                             if cleaned_chunk:
                                 chunks.append(cleaned_chunk)
+                                print(f"      ✅ Valid chunk: Section='{chunk.get('Section_Title', 'N/A')}', Words={len(chunk['content'].split())}")
                 break  # Use first valid JSON array
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                print(f"    ⚠️ JSON decode error: {e}")
                 continue
         
         # If no valid JSON found, create fallback chunk
         if not chunks:
-            chunks = self._create_fallback_chunk(response_text, page_num, global_metadata)
+            print(f"    ⚠️ No valid JSON found, creating fallback chunk")
+            # Clean up the response text
+            content = re.sub(r'[^\w\s.,;:!?()-]', ' ', response_text)
+            content = re.sub(r'\s+', ' ', content).strip()
+            
+            if len(content) < 50:  # Too short to be useful
+                content = f"Unable to process page {page_num} content properly."
+            
+            chunks = self._create_failure_chunk(
+                page_num, 
+                global_metadata, 
+                content,
+                failure_type="fallback",
+                previous_context=previous_context
+            )
         
+        print(f"    📊 Generated {len(chunks)} chunks for page {page_num}")
         return chunks
 
-    def _validate_chunk(self, chunk: Dict[str, Any], page_num: int, global_metadata: Dict[str, str]) -> Optional[Dict[str, Any]]:
-        """Validate and standardize chunk format"""
-        required_fields = [
-            "Insurer", "Document_Name", "Document_Date", "Section_Title", 
-            "Subheading", "Captions", "Product_type", "Page_no", "content"
-        ]
+    def _validate_chunk(self, chunk: Dict[str, Any], page_num: int, global_metadata: Dict[str, str], previous_context: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+        """Validate and standardize chunk format, adding consistent global metadata and handling context inheritance"""
         
-        # Ensure all required fields exist
-        for field in required_fields:
+        # Define expected page-level fields from LLM
+        page_level_fields = ["Section_Title", "Subheading", "content"]
+        
+        # Ensure all page-level fields exist
+        for field in page_level_fields:
             if field not in chunk:
                 chunk[field] = "N/A"
         
-        # Override with global metadata where appropriate
-        chunk["Page_no"] = page_num
-        if global_metadata.get("insurer") and global_metadata["insurer"] != "Unknown":
-            chunk["Insurer"] = global_metadata["insurer"]
-        if global_metadata.get("document_name") and global_metadata["document_name"] != "Unknown":
-            chunk["Document_Name"] = global_metadata["document_name"]
-        if global_metadata.get("document_date") and global_metadata["document_date"] != "Unknown":
-            chunk["Document_Date"] = global_metadata["document_date"]
-        if global_metadata.get("product_type") and global_metadata["product_type"] != "Unknown":
-            chunk["Product_type"] = global_metadata["product_type"]
+        # Handle context inheritance
+        if previous_context:
+            # If current chunk has no Section_Title or it's N/A, inherit from previous context
+            if chunk.get("Section_Title") in ["N/A", "", None]:
+                chunk["Section_Title"] = previous_context.get("Section_Title", "N/A")
+                print(f"      🔗 Inherited Section_Title: '{chunk['Section_Title']}'")
+                
+                # Only inherit Subheading if we're continuing in the same section
+                if chunk.get("Subheading") in ["N/A", "", None] and previous_context.get("Subheading") not in ["N/A", "", None]:
+                    chunk["Subheading"] = previous_context.get("Subheading", "N/A")
+                    print(f"      🔗 Inherited Subheading: '{chunk['Subheading']}'")
+            
+            # If we have a new Section_Title, don't inherit Subheading (new section starts fresh)
+            elif chunk.get("Section_Title") not in ["N/A", "", None]:
+                print(f"      🆕 New section detected: '{chunk['Section_Title']}' - not inheriting Subheading")
         
-        # Validate content length (50-1000 words)
+        # Validate content length (50-1000 words, except for image content)
         content = str(chunk.get("content", "")).strip()
-        if not content or len(content.split()) < 5:  # Too short
+        content_label = chunk.get("content_label", "text")
+        
+        if not content:  
             return None
+
         
         # Truncate if too long (keep within reasonable limits)
         words = content.split()
         if len(words) > 1500:  # Allow some flexibility
             chunk["content"] = " ".join(words[:1500]) + "..."
         
-        return chunk
+        # Add consistent global metadata using Python (no LLM variability)
+        validated_chunk = {
+            # Global metadata - consistent across all chunks
+            "Insurer": global_metadata.get("insurer", "Unknown"),
+            "Document_Name": global_metadata.get("document_name", "Unknown"),
+            "Document_Date": global_metadata.get("document_date", "Unknown"),
+            "Product_type": global_metadata.get("product_type", "Unknown"),
+            "Page_no": page_num,
+            
+            # Page-level metadata from LLM - can vary by page/chunk
+            "Section_Title": chunk["Section_Title"],
+            "Subheading": chunk["Subheading"], 
+            "content": chunk["content"],
+            "content_label": chunk.get("content_label", "text")
+        }
+        
+        return validated_chunk
 
-    def _create_error_chunk(self, page_num: int, global_metadata: Dict[str, str], error_msg: str) -> List[Dict[str, Any]]:
-        """Create error chunk when processing fails"""
+    def _create_failure_chunk(self, page_num: int, global_metadata: Dict[str, str], 
+                             error_msg: str, failure_type: str = "error", 
+                             previous_context: Optional[Dict[str, str]] = None) -> List[Dict[str, Any]]:
+        """Create chunk when processing fails - unified method for both error and fallback cases"""
+        
+        # For fallback type, try to inherit context; for error type, use fixed values
+        if failure_type == "fallback" and previous_context:
+            section_title = previous_context.get("Section_Title", "N/A")
+            subheading = previous_context.get("Subheading", "N/A")
+        else:
+            section_title = "Error"
+            subheading = "Processing Error"
+        
         return [{
             "Insurer": global_metadata.get("insurer", "Unknown"),
             "Document_Name": global_metadata.get("document_name", "Unknown"),
             "Document_Date": global_metadata.get("document_date", "Unknown"),
-            "Section_Title": "Error",
-            "Subheading": "Processing Error",
-            "Captions": "N/A",
+            "Section_Title": section_title,
+            "Subheading": subheading,
             "Product_type": global_metadata.get("product_type", "Unknown"),
             "Page_no": page_num,
-            "content": f"Error processing page {page_num}: {error_msg}"
+            "content": error_msg[:2000],  # Limit length consistently
+            "content_label": failure_type
         }]
 
-    def _create_fallback_chunk(self, response_text: str, page_num: int, global_metadata: Dict[str, str]) -> List[Dict[str, Any]]:
-        """Create fallback chunk from raw response when JSON parsing fails"""
-        # Clean up the response text
-        content = re.sub(r'[^\w\s.,;:!?()-]', ' ', response_text)
-        content = re.sub(r'\s+', ' ', content).strip()
-        
-        if len(content) < 50:  # Too short to be useful
-            content = f"Unable to process page {page_num} content properly."
-        
-        return [{
-            "Insurer": global_metadata.get("insurer", "Unknown"),
-            "Document_Name": global_metadata.get("document_name", "Unknown"), 
-            "Document_Date": global_metadata.get("document_date", "Unknown"),
-            "Section_Title": "N/A",
-            "Subheading": "N/A",
-            "Captions": "N/A",
-            "Product_type": global_metadata.get("product_type", "Unknown"),
-            "Page_no": page_num,
-            "content": content[:2000]  # Limit length
-        }]
+
 
     def process_pdf(self, pdf_path: str, output_dir: Optional[str] = None) -> str:
         """
@@ -331,10 +465,12 @@ If any information is not found, use "Unknown".
         
         # Process each page
         all_chunks = []
+        current_context = None  # Initialize context
+        
         with open(output_file, 'w', encoding='utf-8') as f:
             for img, page_num in images:
                 print(f"Processing page {page_num}/{len(images)}...")
-                chunks = self.process_page(img, page_num, global_metadata)
+                chunks, current_context = self.process_page(img, page_num, global_metadata, current_context)
                 
                 # Write chunks to JSONL file
                 for chunk in chunks:
@@ -342,6 +478,8 @@ If any information is not found, use "Unknown".
                     all_chunks.append(chunk)
                 
                 print(f"  Generated {len(chunks)} chunks")
+                if current_context:
+                    print(f"  Context for next page: Section='{current_context.get('Section_Title', 'N/A')}', Subheading='{current_context.get('Subheading', 'N/A')}'")
         
         print(f"\nProcessing complete!")
         print(f"Total chunks generated: {len(all_chunks)}")
