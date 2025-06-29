@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize embedder and persistent ChromaDB client
-query = "give me separately the Critical Illness conditions for both TAL 2022 and TAL 2023"
+query =  "What’s the waiting period before I can receive Income Protection payments? in TAL 2023?"
 # embedder = OllamaEmbeddings(model="mxbai-embed-large")
 embedder = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
 client = chromadb.PersistentClient(path="chromadb")
@@ -54,7 +54,7 @@ result = chain.invoke({"query": query, "tools": namespaces})
 print(result)
 
 # === Retrieve and Format Contexts ===
-def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=15):
+def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=5):
     # Extract content from AIMessage and remove markdown formatting
     content = llm_output.content if hasattr(llm_output, 'content') else str(llm_output)
     # Remove markdown code block formatting if present
@@ -95,7 +95,8 @@ def retrieve_contexts_for_subquestions(llm_output, client, embedder, k=15):
                 "content": doc.page_content,
                 "insurer": metadata.get("insurer", "N/A"),
                 "product_type": metadata.get("product_type", "N/A"),
-                "page_no": metadata.get("page_no", "N/A")
+                "page_no": metadata.get("page_no", "N/A"),
+                "chunk_id": metadata.get("id", metadata.get("chunk_id", "N/A"))
             })
         
 
@@ -121,6 +122,7 @@ def group_and_format_docs(docs):
                 f"Section Title: {doc.get('section_title', 'N/A')}\n"
                 f"Subheading: {doc.get('subheading', 'N/A')}\n"
                 f"Content:\n{doc['content']}\n"
+                f"Chunk ID: {doc.get('chunk_id', 'N/A')}\n"
                 f"--- END OF DOCUMENT ---"
               
             )
@@ -143,7 +145,7 @@ You are provided with multiple document excerpts. Each excerpt is clearly marked
 - '--- END OF DOCUMENT ---'
 
 Your task is to:
-1. Carefully read and extract relevant information from each document based on the user's question.
+1. Carefully read and extract relevant information from each document based on the user's question. Use all the data to formulate the answer. This includes using the metadata and the wraped text
 2. Compare and contrast the information across the different documents.
 3. Clearly identify which document each piece of information comes from.
 4. When referencing information, always include the [source_file, subheader] in brackets.

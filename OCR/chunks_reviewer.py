@@ -323,9 +323,120 @@ Based on this feedback and the PDF page image, generate improved chunks that add
             'Product_type': first_chunk.get('Product_type', 'Unknown')
         }
 
+    def display_review_results(self, review_results: List[ChunkReviewResult]) -> None:
+        """Display review results in a formatted way"""
+        print("\n" + "="*80)
+        print("📋 CHUNKS REVIEW RESULTS")
+        print("="*80)
+        
+        total_pages = len(review_results)
+        low_confidence_pages = [r for r in review_results if r.confidence_score < 75]
+        
+        # Summary
+        print(f"\n📊 SUMMARY:")
+        print(f"   Total pages reviewed: {total_pages}")
+        print(f"   Low confidence pages: {len(low_confidence_pages)}")
+        print(f"   Average confidence: {sum(r.confidence_score for r in review_results) / len(review_results):.1f}")
+        
+        # Detailed results
+        print(f"\n📄 DETAILED RESULTS:")
+        for result in review_results:
+            status_icon = "✅" if result.confidence_score >= 75 else "⚠️" if result.confidence_score >= 50 else "❌"
+            print(f"\n{status_icon} Page {result.page_no}: {result.confidence_score:.1f}% confidence")
+            print(f"   Summary: {result.review_summary}")
+            
+            if result.issues_found:
+                print(f"   Issues found:")
+                for issue in result.issues_found:
+                    print(f"     • {issue}")
+
+    def get_user_selection(self, review_results: List[ChunkReviewResult]) -> List[int]:
+        """Get user selection for which pages to regenerate"""
+        print("\n" + "="*80)
+        print("🤔 MANUAL SELECTION - Choose pages to regenerate")
+        print("="*80)
+        
+        # Show selectable pages
+        selectable_pages = []
+        print("\nPages available for regeneration:")
+        for result in review_results:
+            if not result.is_accurate or result.confidence_score < 90:
+                selectable_pages.append(result.page_no)
+                confidence_icon = "🔴" if result.confidence_score < 50 else "🟡" if result.confidence_score < 75 else "🟢"
+                print(f"  {confidence_icon} Page {result.page_no}: {result.confidence_score:.1f}% - {result.review_summary[:60]}...")
+        
+        if not selectable_pages:
+            print("✨ All pages have high confidence scores. No regeneration needed!")
+            return []
+        
+        print(f"\nAvailable options:")
+        print(f"  • Enter page numbers (comma-separated, e.g., '1,3,5')")
+        print(f"  • Enter 'all' to regenerate all problematic pages")
+        print(f"  • Enter 'none' or press Enter to skip regeneration")
+        print(f"  • Enter 'auto' to use automatic threshold (confidence < 75)")
+        
+        while True:
+            try:
+                user_input = input(f"\n👤 Your choice: ").strip().lower()
+                
+                if user_input == '' or user_input == 'none':
+                    print("✋ Skipping regeneration. Original chunks will be kept.")
+                    return []
+                
+                elif user_input == 'all':
+                    print(f"🔄 Will regenerate all {len(selectable_pages)} problematic pages.")
+                    return selectable_pages
+                
+                elif user_input == 'auto':
+                    auto_pages = [r.page_no for r in review_results if r.confidence_score < 75]
+                    print(f"🤖 Using automatic selection: {len(auto_pages)} pages with confidence < 75%")
+                    return auto_pages
+                
+                else:
+                    # Parse comma-separated page numbers
+                    page_numbers = [int(p.strip()) for p in user_input.split(',')]
+                    
+                    # Validate page numbers
+                    invalid_pages = [p for p in page_numbers if p not in selectable_pages]
+                    if invalid_pages:
+                        print(f"❌ Invalid page numbers: {invalid_pages}. Available pages: {selectable_pages}")
+                        continue
+                    
+                    print(f"✅ Will regenerate {len(page_numbers)} selected pages: {page_numbers}")
+                    return page_numbers
+                    
+            except ValueError:
+                print("❌ Invalid input. Please enter page numbers, 'all', 'none', or 'auto'.")
+            except KeyboardInterrupt:
+                print("\n\n👋 Operation cancelled by user.")
+                return []
+
+    def confirm_regeneration(self, selected_pages: List[int]) -> bool:
+        """Ask for final confirmation before regeneration"""
+        if not selected_pages:
+            return False
+            
+        print(f"\n⚡ About to regenerate {len(selected_pages)} pages: {selected_pages}")
+        print("⚠️  This will use API calls and may take some time.")
+        
+        while True:
+            try:
+                confirm = input("Continue? (y/n): ").strip().lower()
+                if confirm in ['y', 'yes']:
+                    return True
+                elif confirm in ['n', 'no']:
+                    print("❌ Regeneration cancelled.")
+                    return False
+                else:
+                    print("Please enter 'y' or 'n'")
+            except KeyboardInterrupt:
+                print("\n\n👋 Operation cancelled by user.")
+                return False
+
     def review_and_improve_chunks(self, jsonl_path: str, pdf_path: str, 
                                  output_dir: Optional[str] = None,
-                                 confidence_threshold: float = 75.0) -> Dict[str, Any]:
+                                 confidence_threshold: float = 75.0,
+                                 interactive: bool = True) -> Dict[str, Any]:
         """
         Main method to review and improve chunks
         
@@ -333,7 +444,8 @@ Based on this feedback and the PDF page image, generate improved chunks that add
             jsonl_path: Path to existing chunks JSONL file
             pdf_path: Path to original PDF file
             output_dir: Output directory for improved chunks
-            confidence_threshold: Minimum confidence score to accept chunks
+            confidence_threshold: Minimum confidence score to accept chunks (used in auto mode)
+            interactive: If True, ask user for manual selection. If False, use automatic threshold
             
         Returns:
             Dict with review results and improved chunks
@@ -351,14 +463,12 @@ Based on this feedback and the PDF page image, generate improved chunks that add
         # Group chunks by page
         page_groups = self.group_chunks_by_page(chunks)
         
-        # Process each page
+        # PHASE 1: Review all pages
+        print(f"\n🔍 PHASE 1: Reviewing {len(page_groups)} pages...")
         review_results = []
-        improved_chunks_data = []
-        total_pages = len(page_groups)
-        pages_improved = 0
         
         for page_no in sorted(page_groups.keys()):
-            logger.info(f"Processing page {page_no}/{total_pages}")
+            logger.info(f"Reviewing page {page_no}/{len(page_groups)}")
             
             # Get page image
             page_image = self.pdf_page_to_image(pdf_path, page_no)
@@ -370,32 +480,65 @@ Based on this feedback and the PDF page image, generate improved chunks that add
             page_chunks = page_groups[page_no]
             review_result = self.review_page_chunks(page_image, page_chunks, page_no)
             review_results.append(review_result)
+        
+        # Display review results
+        self.display_review_results(review_results)
+        
+        # PHASE 2: Get user selection or use automatic threshold
+        if interactive:
+            selected_pages = self.get_user_selection(review_results)
+            if selected_pages and not self.confirm_regeneration(selected_pages):
+                selected_pages = []
+        else:
+            # Automatic mode: use confidence threshold
+            selected_pages = [r.page_no for r in review_results 
+                            if not r.is_accurate or r.confidence_score < confidence_threshold]
+            print(f"\n🤖 Automatic mode: Selected {len(selected_pages)} pages for regeneration (confidence < {confidence_threshold})")
+        
+        # PHASE 3: Regenerate selected pages
+        improved_chunks_data = []
+        pages_improved = 0
+        
+        if selected_pages:
+            print(f"\n🔄 PHASE 3: Regenerating {len(selected_pages)} selected pages...")
             
-            # Decide whether to regenerate chunks
-            needs_improvement = (
-                not review_result.is_accurate or 
-                review_result.confidence_score < confidence_threshold
-            )
-            
-            if needs_improvement:
-                logger.info(f"Page {page_no} needs improvement (confidence: {review_result.confidence_score})")
-                improved_chunks = self.regenerate_chunks(
-                    page_image, page_no, review_result, global_metadata
-                )
+            for page_no in sorted(page_groups.keys()):
+                page_chunks = page_groups[page_no]
                 
-                if improved_chunks:
-                    review_result.improved_chunks = improved_chunks
-                    improved_chunks_data.extend(improved_chunks)
-                    pages_improved += 1
+                if page_no in selected_pages:
+                    logger.info(f"Regenerating page {page_no}")
+                    
+                    # Get page image and review result
+                    page_image = self.pdf_page_to_image(pdf_path, page_no)
+                    review_result = next((r for r in review_results if r.page_no == page_no), None)
+                    
+                    if page_image and review_result:
+                        improved_chunks = self.regenerate_chunks(
+                            page_image, page_no, review_result, global_metadata
+                        )
+                        
+                        if improved_chunks:
+                            improved_chunks_data.extend(improved_chunks)
+                            pages_improved += 1
+                            
+                            # Update review result with improved chunks
+                            review_result.improved_chunks = improved_chunks
+                        else:
+                            # Keep original chunks if regeneration failed
+                            improved_chunks_data.extend(page_chunks)
+                    else:
+                        # Keep original chunks if image/review not available
+                        improved_chunks_data.extend(page_chunks)
                 else:
-                    # Keep original chunks if regeneration failed
+                    # Keep original chunks for non-selected pages
                     improved_chunks_data.extend(page_chunks)
-            else:
-                logger.info(f"Page {page_no} is accurate (confidence: {review_result.confidence_score})")
-                # Keep original chunks
+        else:
+            print(f"\n✋ No pages selected for regeneration. Keeping original chunks.")
+            # Keep all original chunks
+            for page_chunks in page_groups.values():
                 improved_chunks_data.extend(page_chunks)
         
-        # Save results
+        # PHASE 4: Save results
         if output_dir is None:
             output_dir = os.path.dirname(jsonl_path)
         
@@ -413,11 +556,14 @@ Based on this feedback and the PDF page image, generate improved chunks that add
         review_report_path = os.path.join(output_dir, f"{base_name}_review_report_{timestamp}.json")
         review_report = {
             "review_summary": {
-                "total_pages": total_pages,
-                "pages_improved": pages_improved,
-                "improvement_rate": pages_improved / total_pages if total_pages > 0 else 0,
+                "total_pages": len(page_groups),
+                "pages_selected_for_improvement": len(selected_pages),
+                "pages_actually_improved": pages_improved,
+                "improvement_rate": pages_improved / len(page_groups) if len(page_groups) > 0 else 0,
                 "average_confidence": sum(r.confidence_score for r in review_results) / len(review_results) if review_results else 0,
                 "confidence_threshold": confidence_threshold,
+                "interactive_mode": interactive,
+                "selected_pages": selected_pages,
                 "timestamp": timestamp
             },
             "page_reviews": [
@@ -427,7 +573,8 @@ Based on this feedback and the PDF page image, generate improved chunks that add
                     "confidence_score": r.confidence_score,
                     "issues_found": r.issues_found,
                     "review_summary": r.review_summary,
-                    "was_improved": r.improved_chunks is not None
+                    "was_selected_for_improvement": r.page_no in selected_pages,
+                    "was_actually_improved": r.improved_chunks is not None
                 }
                 for r in review_results
             ]
@@ -436,14 +583,18 @@ Based on this feedback and the PDF page image, generate improved chunks that add
         with open(review_report_path, 'w', encoding='utf-8') as f:
             json.dump(review_report, f, indent=2, ensure_ascii=False)
         
-        # Print summary
-        logger.info(f"\nReview completed!")
-        logger.info(f"├── Total pages processed: {total_pages}")
-        logger.info(f"├── Pages improved: {pages_improved}")
-        logger.info(f"├── Improvement rate: {pages_improved/total_pages*100:.1f}%")
-        logger.info(f"├── Average confidence: {review_report['review_summary']['average_confidence']:.1f}")
-        logger.info(f"├── Improved chunks: {improved_jsonl_path}")
-        logger.info(f"└── Review report: {review_report_path}")
+        # Print final summary
+        print(f"\n" + "="*80)
+        print(f"✅ REVIEW COMPLETED!")
+        print(f"="*80)
+        print(f"📊 Total pages processed: {len(page_groups)}")
+        print(f"🎯 Pages selected for improvement: {len(selected_pages)}")
+        print(f"🔄 Pages actually improved: {pages_improved}")
+        print(f"📈 Improvement rate: {pages_improved/len(page_groups)*100:.1f}%")
+        print(f"🎯 Average confidence: {review_report['review_summary']['average_confidence']:.1f}")
+        print(f"📁 Improved chunks: {improved_jsonl_path}")
+        print(f"📋 Review report: {review_report_path}")
+        print(f"="*80)
         
         return {
             "review_results": review_results,
@@ -456,23 +607,27 @@ Based on this feedback and the PDF page image, generate improved chunks that add
         }
 
 def main():
-    """Example usage"""
+    """Example usage with interactive mode"""
     reviewer = ChunksReviewer()
     
     # Example files - adjust paths as needed
-    jsonl_file = "ocr/Data_Json/TAL_AcceleratedProtection_2022-08-05_chunks.jsonl"
-    pdf_file = "ocr/TAL_AcceleratedProtection_2022-08-05.pdf"
+    jsonl_file = "Data_Json/TAL_AcceleratedProtection_2022-08-05_chunks.jsonl"
+    pdf_file = "TAL_AcceleratedProtection_2022-08-05.pdf"
     
     if os.path.exists(jsonl_file) and os.path.exists(pdf_file):
+        print("🚀 Starting interactive chunk review...")
+        print("💡 You'll be able to manually select which pages to regenerate after the review phase.")
+        
         results = reviewer.review_and_improve_chunks(
             jsonl_path=jsonl_file,
             pdf_path=pdf_file,
-            confidence_threshold=75.0  # Adjust as needed
+            confidence_threshold=75.0,
+            interactive=True  # Enable human-in-the-loop
         )
         
-        print(f"\nReview completed with {results['summary']['improvement_rate']*100:.1f}% improvement rate")
+        print(f"\n🎉 Review completed! Check the output files for results.")
     else:
-        print(f"Files not found:")
+        print(f"❌ Files not found:")
         print(f"JSONL: {jsonl_file} (exists: {os.path.exists(jsonl_file)})")
         print(f"PDF: {pdf_file} (exists: {os.path.exists(pdf_file)})")
 

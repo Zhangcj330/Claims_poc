@@ -4,8 +4,15 @@ tqdm
 langchain-google-genai
 langchain-core
 langchain_chroma
+langchain-openai
 python-dotenv
 PyMuPDF
 Pillow
-
 docling
+
+# Additional dependencies for the Q&A bot
+argparse
+typing
+
+# Dependencies for summary generation
+openai>=1.0.0

@@ -4,23 +4,27 @@ import json
 import chromadb
 import time
 from tqdm import tqdm
-from langchain_openai import OpenAIEmbeddings
+from langchain_ollama import OllamaEmbeddings
 
 from dotenv import load_dotenv
 load_dotenv()
 
-# Initialize embedder
-embeddings = OpenAIEmbeddings(model="text-embedding-3-small", api_key=os.getenv("OPENAI_API_KEY"))
+# Initialize embedder - using Ollama for full local operation
+embeddings = OllamaEmbeddings(model="mxbai-embed-large")
 
 # Persistent ChromaDB client
 client = chromadb.PersistentClient(path="chromadb")
 
-# Rate limiting settings for OpenAI Embedding API (more generous limits)
-REQUESTS_PER_MINUTE = 60  # OpenAI typically allows much higher rates
-DELAY_BETWEEN_REQUESTS = 60.0 / REQUESTS_PER_MINUTE  # 1 second between requests
+# Rate limiting settings for local Ollama (much more generous than API limits)
+REQUESTS_PER_MINUTE = 120  # Local models can handle higher rates
+DELAY_BETWEEN_REQUESTS = 60.0 / REQUESTS_PER_MINUTE  # 0.5 second between requests
 
 # Load and process all JSON/JSONL files in ocr/Data_Json directory
 data_dir = "ocr/Data_Json"
+
+print(f"🔍 Scanning directory: {data_dir}")
+print(f"📊 Using embedding model: mxbai-embed-large (1024 dimensions)")
+print(f"⚡ Rate limit: {REQUESTS_PER_MINUTE} requests/minute ({DELAY_BETWEEN_REQUESTS:.1f}s delay)\n")
 
 for filename in os.listdir(data_dir):
     if filename.endswith("_chunks.json") or filename.endswith("_chunks.jsonl"):
@@ -33,10 +37,14 @@ for filename in os.listdir(data_dir):
                 chunks = json.load(f)
         elif filename.endswith("_chunks.jsonl"):
             with open(file_path, "r", encoding="utf-8") as f:
-                for line in f:
+                for line_num, line in enumerate(f, 1):
                     line = line.strip()
                     if line:  # Skip empty lines
-                        chunks.append(json.loads(line))
+                        try:
+                            chunks.append(json.loads(line))
+                        except json.JSONDecodeError as e:
+                            print(f"Warning: Skipping invalid JSON on line {line_num} in {filename}: {e}")
+                            continue
 
         # Use filename (without _chunks.json or _chunks.jsonl) as collection name
         collection_name = filename.replace("_chunks.json", "").replace("_chunks.jsonl", "")

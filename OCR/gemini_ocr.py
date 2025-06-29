@@ -524,6 +524,231 @@ Extract chunks following the specified JSON schema."""
             for section, count in sorted(section_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
                 print(f"  {section}: {count} chunks")
 
+    def validate_output_file(self, output_file: str) -> Dict[str, Any]:
+        """
+        Comprehensive validation of the generated JSONL file
+        
+        Returns:
+            Dict with validation results: {
+                'is_valid': bool,
+                'errors': List[str],
+                'warnings': List[str], 
+                'stats': Dict[str, Any],
+                'fixed_issues': List[str]
+            }
+        """
+        print(f"\n{'='*50}")
+        print("DATA FORMAT VALIDATION")
+        print(f"{'='*50}")
+        
+        validation_result = {
+            'is_valid': True,
+            'errors': [],
+            'warnings': [],
+            'stats': {},
+            'fixed_issues': []
+        }
+        
+        if not os.path.exists(output_file):
+            validation_result['is_valid'] = False
+            validation_result['errors'].append(f"Output file does not exist: {output_file}")
+            return validation_result
+        
+        # Required fields for each chunk
+        required_fields = [
+            'Insurer', 'Document_Name', 'Document_Date', 'Product_type',
+            'Page_no', 'Section_Title', 'Subheading', 'content', 'content_label'
+        ]
+        
+        valid_chunks = []
+        line_number = 0
+        json_errors = 0
+        field_errors = 0
+        data_quality_issues = 0
+        
+        try:
+            with open(output_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line_number += 1
+                    line = line.strip()
+                    
+                    if not line:  # Skip empty lines
+                        continue
+                    
+                    # Test 1: Valid JSON format
+                    try:
+                        chunk = json.loads(line)
+                    except json.JSONDecodeError as e:
+                        json_errors += 1
+                        validation_result['errors'].append(
+                            f"Line {line_number}: Invalid JSON format - {str(e)}"
+                        )
+                        validation_result['is_valid'] = False
+                        continue
+                    
+                    # Test 2: Required fields validation
+                    missing_fields = []
+                    for field in required_fields:
+                        if field not in chunk:
+                            missing_fields.append(field)
+                    
+                    if missing_fields:
+                        field_errors += 1
+                        validation_result['errors'].append(
+                            f"Line {line_number}: Missing required fields: {missing_fields}"
+                        )
+                        validation_result['is_valid'] = False
+                        continue
+                    
+                    # Test 3: Data type validation
+                    type_issues = []
+                    if not isinstance(chunk.get('Page_no'), int):
+                        type_issues.append("Page_no must be integer")
+                    
+                    if not isinstance(chunk.get('content'), str):
+                        type_issues.append("content must be string")
+                    
+                    if type_issues:
+                        field_errors += 1
+                        validation_result['errors'].append(
+                            f"Line {line_number}: Type validation failed: {type_issues}"
+                        )
+                        validation_result['is_valid'] = False
+                        continue
+                    
+                    # Test 4: Data quality checks (warnings, not errors)
+                    quality_warnings = []
+                    
+                    # Check content length
+                    content_words = len(chunk['content'].split())
+                    if content_words < 5:
+                        quality_warnings.append(f"Very short content ({content_words} words)")
+                    elif content_words > 2000:
+                        quality_warnings.append(f"Very long content ({content_words} words)")
+                    
+                    # Check for empty string values
+                    empty_fields = []
+                    for field in required_fields:
+                        if isinstance(chunk[field], str) and chunk[field].strip() == "":
+                            empty_fields.append(field)
+                    
+                    if empty_fields:
+                        quality_warnings.append(f"Empty string fields: {empty_fields}")
+                    
+                    # Check for suspicious patterns
+                    content = chunk['content'].lower()
+                    if 'error' in content or 'failed' in content:
+                        quality_warnings.append("Content may contain error messages")
+                    
+                    if quality_warnings:
+                        data_quality_issues += 1
+                        validation_result['warnings'].append(
+                            f"Line {line_number}: Quality issues: {quality_warnings}"
+                        )
+                    
+                    valid_chunks.append(chunk)
+            
+            # Test 5: Consistency checks across all chunks
+            if valid_chunks:
+                self._validate_consistency(valid_chunks, validation_result)
+            
+            # Test 6: File integrity check
+            if line_number == 0:
+                validation_result['is_valid'] = False
+                validation_result['errors'].append("File is empty")
+            
+        except Exception as e:
+            validation_result['is_valid'] = False
+            validation_result['errors'].append(f"File reading error: {str(e)}")
+        
+        # Generate validation statistics
+        validation_result['stats'] = {
+            'total_lines': line_number,
+            'valid_chunks': len(valid_chunks),
+            'json_errors': json_errors,
+            'field_errors': field_errors,
+            'data_quality_issues': data_quality_issues
+        }
+        
+        # Print validation results
+        self._print_validation_results(validation_result, output_file)
+        
+        return validation_result
+    
+    def _validate_consistency(self, chunks: List[Dict[str, Any]], validation_result: Dict[str, Any]):
+        """Validate consistency across all chunks"""
+        if not chunks:
+            return
+        
+        # Check page number sequence
+        page_numbers = [chunk['Page_no'] for chunk in chunks]
+        unique_pages = set(page_numbers)
+        
+        # Should have consecutive page numbers starting from 1
+        expected_pages = set(range(1, max(page_numbers) + 1))
+        missing_pages = expected_pages - unique_pages
+        
+        if missing_pages:
+            validation_result['warnings'].append(
+                f"Missing page numbers: {sorted(missing_pages)}"
+            )
+        
+        # Check global metadata consistency
+        global_fields = ['Insurer', 'Document_Name', 'Document_Date', 'Product_type']
+        for field in global_fields:
+            values = set(chunk[field] for chunk in chunks)
+            if len(values) > 1:
+                validation_result['warnings'].append(
+                    f"Inconsistent {field} values: {values}"
+                )
+        
+        # Check for reasonable content distribution
+        content_lengths = [len(chunk['content'].split()) for chunk in chunks]
+        avg_length = sum(content_lengths) / len(content_lengths)
+        
+        if avg_length < 20:
+            validation_result['warnings'].append(
+                f"Average content length is very low ({avg_length:.1f} words)"
+            )
+    
+    def _print_validation_results(self, validation_result: Dict[str, Any], output_file: str):
+        """Print detailed validation results"""
+        stats = validation_result['stats']
+        
+        print(f"File: {output_file}")
+        print(f"Status: {'✅ VALID' if validation_result['is_valid'] else '❌ INVALID'}")
+        print(f"\nStatistics:")
+        print(f"  Total lines: {stats['total_lines']}")
+        print(f"  Valid chunks: {stats['valid_chunks']}")
+        print(f"  JSON errors: {stats['json_errors']}")
+        print(f"  Field errors: {stats['field_errors']}")
+        print(f"  Quality issues: {stats['data_quality_issues']}")
+        
+        if validation_result['errors']:
+            print(f"\n❌ ERRORS ({len(validation_result['errors'])}):")
+            for error in validation_result['errors'][:10]:  # Show first 10 errors
+                print(f"  • {error}")
+            if len(validation_result['errors']) > 10:
+                print(f"  ... and {len(validation_result['errors']) - 10} more errors")
+        
+        if validation_result['warnings']:
+            print(f"\n⚠️  WARNINGS ({len(validation_result['warnings'])}):")
+            for warning in validation_result['warnings'][:10]:  # Show first 10 warnings
+                print(f"  • {warning}")
+            if len(validation_result['warnings']) > 10:
+                print(f"  ... and {len(validation_result['warnings']) - 10} more warnings")
+        
+        if validation_result['fixed_issues']:
+            print(f"\n🔧 AUTO-FIXED ISSUES:")
+            for fix in validation_result['fixed_issues']:
+                print(f"  • {fix}")
+        
+        if validation_result['is_valid']:
+            print(f"\n✅ File format validation passed!")
+        else:
+            print(f"\n❌ File format validation failed! Please fix errors before using this file.")
+    
+
 def main():
     """Main function for command line usage"""
     import argparse

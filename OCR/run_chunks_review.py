@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-OCR Chunks Review - 运行脚本
+OCR Chunks Review - Main Script
 
-这个脚本演示如何使用 ChunksReviewer 来检查和改进现有的 OCR chunks。
+This script demonstrates how to use ChunksReviewer to review and improve existing OCR chunks.
 
-使用方法:
+Usage:
     python run_chunks_review.py
 
-配置文件:
-    请确保在 .env 文件中设置了 GOOGLE_API_KEY
+Configuration:
+    Please make sure GOOGLE_API_KEY is set in .env file
 """
 
 import os
@@ -17,13 +17,13 @@ import argparse
 from pathlib import Path
 from dotenv import load_dotenv
 
-# 添加当前目录到 Python 路径
+# Add current directory to Python path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from chunks_reviewer import ChunksReviewer
 
 def main():
-    # 解析命令行参数
+    # Parse command line arguments
     parser = argparse.ArgumentParser(description='Review and improve OCR chunks using Gemini 2.5')
     parser.add_argument('--jsonl', '-j', 
                        default='Data_Json/TAL_AcceleratedProtection_2022-08-05_chunks.jsonl',
@@ -40,77 +40,77 @@ def main():
     
     args = parser.parse_args()
     
-    # 加载环境变量
+    # Load environment variables
     load_dotenv()
     
-    # 检查 API key
+    # Check API key
     if not os.getenv('GOOGLE_API_KEY'):
-        print("❌ 错误: 请在 .env 文件中设置 GOOGLE_API_KEY")
-        print("💡 提示: 在项目根目录创建 .env 文件，内容如下:")
+        print("❌ Error: Please set GOOGLE_API_KEY in .env file")
+        print("💡 Tip: Create .env file in project root with the following content:")
         print("   GOOGLE_API_KEY=your_api_key_here")
         return 1
     
-    # 检查输入文件
+    # Check input files
     jsonl_path = args.jsonl
     pdf_path = args.pdf
     
     print("🚀 OCR Chunks Review System")
     print("=" * 50)
-    print(f"📄 JSONL 文件: {jsonl_path}")
-    print(f"📄 PDF 文件: {pdf_path}")
-    print(f"🎯 置信度阈值: {args.threshold}")
+    print(f"📄 JSONL file: {jsonl_path}")
+    print(f"📄 PDF file: {pdf_path}")
+    print(f"🎯 Confidence threshold: {args.threshold}")
     
-    # 检查文件是否存在
+    # Check if files exist
     if not os.path.exists(jsonl_path):
-        print(f"❌ 错误: JSONL 文件不存在: {jsonl_path}")
+        print(f"❌ Error: JSONL file not found: {jsonl_path}")
         return 1
     
     if not os.path.exists(pdf_path):
-        print(f"❌ 错误: PDF 文件不存在: {pdf_path}")
+        print(f"❌ Error: PDF file not found: {pdf_path}")
         return 1
     
-    print("✅ 输入文件检查通过")
+    print("✅ Input file validation passed")
     
-    # 如果是 dry run，只显示文件信息
+    # If dry run, only show file information
     if args.dry_run:
-        print("\n🔍 Dry Run - 文件信息:")
+        print("\n🔍 Dry Run - File Information:")
         
-        # 初始化 reviewer（不调用 API）
+        # Initialize reviewer (without API calls)
         try:
             reviewer = ChunksReviewer()
         except Exception as e:
-            print(f"❌ 初始化失败: {e}")
+            print(f"❌ Initialization failed: {e}")
             return 1
         
-        # 加载 chunks
+        # Load chunks
         chunks = reviewer.load_chunks_from_jsonl(jsonl_path)
         page_groups = reviewer.group_chunks_by_page(chunks)
         
-        print(f"📊 总 chunks: {len(chunks)}")
-        print(f"📄 总页面数: {len(page_groups)}")
-        print(f"📄 页面范围: {min(page_groups.keys())} - {max(page_groups.keys())}")
+        print(f"📊 Total chunks: {len(chunks)}")
+        print(f"📄 Total pages: {len(page_groups)}")
+        print(f"📄 Page range: {min(page_groups.keys())} - {max(page_groups.keys())}")
         
-        # 显示每页的 chunks 数量
-        print("\n📄 各页面 chunks 分布:")
-        for page_no in sorted(page_groups.keys())[:10]:  # 只显示前10页
+        # Show chunks distribution per page
+        print("\n📄 Chunks distribution by page:")
+        for page_no in sorted(page_groups.keys())[:10]:  # Show only first 10 pages
             chunk_count = len(page_groups[page_no])
-            print(f"   第 {page_no:2d} 页: {chunk_count} chunks")
+            print(f"   Page {page_no:2d}: {chunk_count} chunks")
         
         if len(page_groups) > 10:
-            print(f"   ... 还有 {len(page_groups) - 10} 页")
+            print(f"   ... and {len(page_groups) - 10} more pages")
         
-        print("\n💡 要开始实际处理，请运行不带 --dry-run 参数的命令")
+        print("\n💡 To start actual processing, run without --dry-run parameter")
         return 0
     
-    # 实际处理
+    # Actual processing
     try:
-        print("\n🚀 开始处理...")
+        print("\n🚀 Starting processing...")
         
-        # 初始化 reviewer
+        # Initialize reviewer
         reviewer = ChunksReviewer()
-        print("✅ ChunksReviewer 初始化成功")
+        print("✅ ChunksReviewer initialized successfully")
         
-        # 运行审查和改进
+        # Run review and improvement
         results = reviewer.review_and_improve_chunks(
             jsonl_path=jsonl_path,
             pdf_path=pdf_path,
@@ -118,40 +118,40 @@ def main():
             confidence_threshold=args.threshold
         )
         
-        # 显示结果
-        print("\n🎉 处理完成!")
+        # Show results
+        print("\n🎉 Processing completed!")
         summary = results['summary']
         
-        print("\n📊 结果摘要:")
+        print("\n📊 Results Summary:")
         print("=" * 30)
-        print(f"📄 总页面数: {summary['total_pages']}")
-        print(f"🔧 改进页面数: {summary['pages_improved']}")
-        print(f"📈 改进率: {summary['improvement_rate']*100:.1f}%")
-        print(f"⭐ 平均置信度: {summary['average_confidence']:.1f}")
+        print(f"📄 Total pages: {summary['total_pages']}")
+        print(f"🔧 Pages improved: {summary['pages_improved']}")
+        print(f"📈 Improvement rate: {summary['improvement_rate']*100:.1f}%")
+        print(f"⭐ Average confidence: {summary['average_confidence']:.1f}")
         
-        print("\n📁 生成的文件:")
+        print("\n📁 Generated files:")
         files = results['files']
-        print(f"📄 改进后的 chunks: {files['improved_chunks']}")
-        print(f"📊 详细报告: {files['review_report']}")
+        print(f"📄 Improved chunks: {files['improved_chunks']}")
+        print(f"📊 Detailed report: {files['review_report']}")
         
-        print("\n✨ 建议:")
+        print("\n✨ Recommendations:")
         if summary['improvement_rate'] > 0.3:
-            print("🔧 有较多页面需要改进，建议检查原始 OCR 质量")
+            print("🔧 Many pages needed improvement, consider checking original OCR quality")
         elif summary['improvement_rate'] > 0.1:
-            print("👍 部分页面有改进，整体质量不错")
+            print("👍 Some pages improved, overall quality is good")
         else:
-            print("🎯 质量很好，几乎不需要改进")
+            print("🎯 Excellent quality, minimal improvements needed")
         
         if summary['average_confidence'] < 70:
-            print("⚠️  平均置信度较低，建议检查文档质量或调整参数")
+            print("⚠️  Average confidence is low, consider checking document quality or adjusting parameters")
         
         return 0
         
     except KeyboardInterrupt:
-        print("\n\n⚠️  用户中断处理")
+        print("\n\n⚠️  Processing interrupted by user")
         return 1
     except Exception as e:
-        print(f"\n❌ 处理出错: {e}")
+        print(f"\n❌ Processing error: {e}")
         import traceback
         traceback.print_exc()
         return 1
